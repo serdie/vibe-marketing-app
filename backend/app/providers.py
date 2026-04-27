@@ -147,9 +147,19 @@ PROVIDER_CATALOG: list[dict] = [
         "models": [
             "openai/gpt-4o-mini", "openai/gpt-4o", "anthropic/claude-3.5-sonnet",
             "google/gemini-2.0-flash-001", "meta-llama/llama-3.3-70b-instruct",
-            "deepseek/deepseek-chat",
+            "deepseek/deepseek-chat", "x-ai/grok-2-latest",
         ],
         "docs": "https://openrouter.ai/keys",
+    },
+    {
+        "id": "xai",
+        "name": "xAI Grok",
+        "env": "XAI_API_KEY",
+        "needs_base_url": False,
+        "tasks": ["text", "grounded"],
+        "default_models": {"text": "grok-2-latest", "grounded": "grok-2-latest"},
+        "models": ["grok-2-latest", "grok-2-1212", "grok-beta"],
+        "docs": "https://console.x.ai/",
     },
     {
         "id": "replicate",
@@ -306,15 +316,55 @@ def _model_for(cfg: ProviderConfig, task: str) -> str:
     return CATALOG_BY_ID.get(cfg.id, {}).get("default_models", {}).get(task, "")
 
 
+def _call_text_single(cfg: ProviderConfig, prompt: str, *, system: str | None, json_mode: bool, grounded: bool) -> dict:
+    if cfg.id == "gemini":
+        return _gemini_text(cfg, prompt, system=system, json_mode=json_mode, grounded=grounded)
+    if cfg.id in ("openai", "openrouter", "openai_compatible", "groq", "deepseek", "together", "mistral", "xai"):
+        return _openai_text(cfg, prompt, system=system, json_mode=json_mode, grounded=grounded)
+    if cfg.id == "anthropic":
+        return _anthropic_text(cfg, prompt, system=system, json_mode=json_mode)
+    if cfg.id == "dashscope":
+        return _dashscope_text(cfg, prompt, system=system, json_mode=json_mode)
+    if cfg.id == "huggingface":
+        return _hf_text(cfg, prompt, system=system, json_mode=json_mode)
+    raise RuntimeError(f"Provider {cfg.id} no soporta texto")
+
+
+def _grounded_capable_ids() -> list[str]:
+    return [pid for pid, p in CATALOG_BY_ID.items() if "grounded" in p.get("tasks", [])]
+
+
 def call_text(prompt: str, *, system: str | None = None, json_mode: bool = False,
               grounded: bool = False, provider_id: str | None = None,
               max_retries: int = 1) -> dict:
-    """Genera texto con el proveedor preferido (o el indicado)."""
-    if grounded:
-        cfg = registry.get(provider_id) if provider_id else registry.choose("grounded")
+    """Genera texto con el proveedor preferido (o el indicado), con fallback a otros proveedores."""
+    # Construimos la lista de candidatos: preferido primero, luego el resto configurado que soporte la tarea
+    candidates: list[ProviderConfig] = []
+    seen: set[str] = set()
+    if provider_id:
+        c = registry.get(provider_id)
+        if c is not None and c.enabled:
+            candidates.append(c); seen.add(c.id)
     else:
-        cfg = registry.get(provider_id) if provider_id else registry.choose("text")
-    if cfg is None:
+        task = "grounded" if grounded else "text"
+        first = registry.choose(task)
+        if first is not None:
+            candidates.append(first); seen.add(first.id)
+        # resto de proveedores que soportan la tarea
+        for pid2, cfg2 in registry._configs.items():
+            if pid2 in seen or not cfg2.enabled:
+                continue
+            if task in CATALOG_BY_ID.get(pid2, {}).get("tasks", []):
+                candidates.append(cfg2); seen.add(pid2)
+        # si grounded y seguimos sin suficientes, añadimos proveedores de texto puros como último recurso
+        if grounded:
+            for pid2, cfg2 in registry._configs.items():
+                if pid2 in seen or not cfg2.enabled:
+                    continue
+                if "text" in CATALOG_BY_ID.get(pid2, {}).get("tasks", []):
+                    candidates.append(cfg2); seen.add(pid2)
+
+    if not candidates:
         return {
             "text": _demo_text(prompt, json_mode),
             "provider": "demo",
@@ -322,26 +372,30 @@ def call_text(prompt: str, *, system: str | None = None, json_mode: bool = False
             "degraded": True,
             "grounded_sources": [],
         }
+
     last_err = None
-    for attempt in range(max_retries + 1):
-        try:
-            if cfg.id == "gemini":
-                return _gemini_text(cfg, prompt, system=system, json_mode=json_mode, grounded=grounded)
-            if cfg.id in ("openai", "openrouter", "openai_compatible", "groq", "deepseek", "together", "mistral"):
-                return _openai_text(cfg, prompt, system=system, json_mode=json_mode)
-            if cfg.id == "anthropic":
-                return _anthropic_text(cfg, prompt, system=system, json_mode=json_mode)
-            if cfg.id == "dashscope":
-                return _dashscope_text(cfg, prompt, system=system, json_mode=json_mode)
-            if cfg.id == "huggingface":
-                return _hf_text(cfg, prompt, system=system, json_mode=json_mode)
-        except Exception as e:
-            last_err = e
-            log.warning("text provider %s error attempt %d: %s", cfg.id, attempt, e)
-            time.sleep(0.5 * (attempt + 1))
+    last_cfg: ProviderConfig | None = None
+    for cfg in candidates:
+        last_cfg = cfg
+        cap_grounded = "grounded" in CATALOG_BY_ID.get(cfg.id, {}).get("tasks", [])
+        # Si pedimos grounded pero este proveedor no lo soporta, hacemos call plano (texto) con nota
+        effective_grounded = grounded and cap_grounded
+        for attempt in range(max_retries + 1):
+            try:
+                out = _call_text_single(cfg, prompt, system=system, json_mode=json_mode, grounded=effective_grounded)
+                if grounded and not cap_grounded:
+                    out["degraded_grounded"] = True
+                    out.setdefault("grounded_sources", [])
+                return out
+            except Exception as e:
+                last_err = e
+                log.warning("text provider %s error attempt %d: %s", cfg.id, attempt, e)
+                time.sleep(0.5 * (attempt + 1))
+        log.warning("text provider %s exhausted, trying next candidate", cfg.id)
+
     return {
         "text": _demo_text(prompt, json_mode),
-        "provider": cfg.id if cfg else "demo",
+        "provider": last_cfg.id if last_cfg else "demo",
         "model": "fallback",
         "degraded": True,
         "grounded_sources": [],
@@ -563,12 +617,13 @@ def _openai_base(cfg: ProviderConfig) -> str:
         "deepseek": "https://api.deepseek.com/v1",
         "together": "https://api.together.xyz/v1",
         "mistral": "https://api.mistral.ai/v1",
+        "xai": "https://api.x.ai/v1",
     }.get(cfg.id, "https://api.openai.com/v1")
 
 
-def _openai_text(cfg: ProviderConfig, prompt: str, *, system: str | None, json_mode: bool) -> dict:
+def _openai_text(cfg: ProviderConfig, prompt: str, *, system: str | None, json_mode: bool, grounded: bool = False) -> dict:
     base = _openai_base(cfg)
-    model = _model_for(cfg, "text")
+    model = _model_for(cfg, "grounded" if grounded else "text") or _model_for(cfg, "text")
     msgs = []
     if system:
         msgs.append({"role": "system", "content": system})
@@ -576,6 +631,9 @@ def _openai_text(cfg: ProviderConfig, prompt: str, *, system: str | None, json_m
     body: dict[str, Any] = {"model": model, "messages": msgs}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
+    if grounded and cfg.id == "xai":
+        # xAI Live Search: https://docs.x.ai/docs/guides/live-search
+        body["search_parameters"] = {"mode": "auto", "return_citations": True}
     headers = {"Authorization": f"Bearer {cfg.api_key}"}
     if cfg.id == "openrouter":
         headers["HTTP-Referer"] = "https://vibe-marketing-app.devinapps.com"
@@ -585,7 +643,14 @@ def _openai_text(cfg: ProviderConfig, prompt: str, *, system: str | None, json_m
         r.raise_for_status()
         data = r.json()
     text = data["choices"][0]["message"]["content"] or ""
-    return {"text": text, "provider": cfg.id, "model": model, "grounded_sources": [], "degraded": False}
+    sources: list[dict] = []
+    if grounded and cfg.id == "xai":
+        for cit in (data.get("citations") or [])[:20]:
+            if isinstance(cit, str):
+                sources.append({"uri": cit, "title": cit})
+            elif isinstance(cit, dict):
+                sources.append({"uri": cit.get("url") or cit.get("uri") or "", "title": cit.get("title") or cit.get("url") or ""})
+    return {"text": text, "provider": cfg.id, "model": model, "grounded_sources": sources, "degraded": False}
 
 
 def _openai_image(cfg: ProviderConfig, prompt: str, *, n: int, aspect: str) -> list[str]:
