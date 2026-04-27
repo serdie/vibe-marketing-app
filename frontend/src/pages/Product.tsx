@@ -135,7 +135,7 @@ export function ProductPage({ project, onUpdate, onNext }: { project: Project; o
         </section>
       )}
 
-      {(icp.sector_principal || personas.length > 0) && onNext && (
+      {(icp?.sector_principal || personas.length > 0) && onNext && (
         <div className="flex justify-end">
           <button className="btn-primary" onClick={onNext}>▶ Siguiente paso: buscar leads</button>
         </div>

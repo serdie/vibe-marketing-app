@@ -38,7 +38,7 @@ PROVIDER_CATALOG: list[dict] = [
         "default_models": {
             "text": "gemini-2.5-flash-lite",
             "image": "imagen-3.0-generate-002",
-            "grounded": "gemini-2.5-flash",
+            "grounded": "gemini-2.5-flash-lite",
         },
         "models": [
             "gemini-2.5-flash-lite",
@@ -421,68 +421,114 @@ def test_connection(provider_id: str) -> dict:
 
 # ---------- Implementaciones concretas (HTTP directo, sin SDKs salvo Gemini) ----------
 
+_GEMINI_FALLBACK_CHAIN = {
+    "grounded": ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-flash-lite-latest"],
+    "text": ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash-lite", "gemini-flash-lite-latest"],
+}
+
+
 def _gemini_text(cfg: ProviderConfig, prompt: str, *, system: str | None, json_mode: bool, grounded: bool) -> dict:
+    """Para grounded usamos siempre HTTP directo (más control sobre 429/503).
+    Para text plano probamos primero el SDK y si falla caemos al HTTP con fallback de modelos."""
+    if grounded:
+        return _gemini_text_http(cfg, prompt, system=system, json_mode=json_mode, grounded=True)
     try:
         from google import genai
         from google.genai import types as gtypes
     except Exception:
-        # fallback HTTP directo
-        return _gemini_text_http(cfg, prompt, system=system, json_mode=json_mode, grounded=grounded)
+        return _gemini_text_http(cfg, prompt, system=system, json_mode=json_mode, grounded=False)
     cli = genai.Client(api_key=cfg.api_key)
-    model = _model_for(cfg, "grounded" if grounded else "text")
+    model = _model_for(cfg, "text")
     cfg_kwargs: dict[str, Any] = {}
     if system:
         cfg_kwargs["system_instruction"] = system
-    if json_mode and not grounded:  # grounded + json no se soportan a la vez
+    if json_mode:
         cfg_kwargs["response_mime_type"] = "application/json"
-    if grounded:
-        cfg_kwargs["tools"] = [gtypes.Tool(google_search=gtypes.GoogleSearch())]
-    resp = cli.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=gtypes.GenerateContentConfig(**cfg_kwargs) if cfg_kwargs else None,
-    )
-    sources: list[dict] = []
     try:
-        for c in resp.candidates or []:
-            gm = getattr(c, "grounding_metadata", None)
-            if not gm:
-                continue
-            for chunk in getattr(gm, "grounding_chunks", []) or []:
-                web = getattr(chunk, "web", None)
-                if web:
-                    sources.append({"title": getattr(web, "title", ""), "uri": getattr(web, "uri", "")})
-    except Exception:
-        pass
-    return {
-        "text": resp.text or "",
-        "provider": "gemini",
-        "model": model,
-        "grounded_sources": sources,
-        "degraded": False,
-    }
+        resp = cli.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=gtypes.GenerateContentConfig(**cfg_kwargs) if cfg_kwargs else None,
+        )
+        return {
+            "text": resp.text or "",
+            "provider": "gemini",
+            "model": model,
+            "grounded_sources": [],
+            "degraded": False,
+        }
+    except Exception as e:
+        log.warning("gemini SDK text failed (%s) — fallback HTTP con cadena de modelos", e)
+        return _gemini_text_http(cfg, prompt, system=system, json_mode=json_mode, grounded=False)
 
 
 def _gemini_text_http(cfg: ProviderConfig, prompt: str, *, system: str | None, json_mode: bool, grounded: bool) -> dict:
-    model = _model_for(cfg, "grounded" if grounded else "text")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={cfg.api_key}"
+    """HTTP directo con retry y fallback de modelo en 429/503."""
+    base_model = _model_for(cfg, "grounded" if grounded else "text")
+    chain = _GEMINI_FALLBACK_CHAIN["grounded" if grounded else "text"]
+    candidates = [base_model] + [m for m in chain if m != base_model]
+
     body: dict[str, Any] = {"contents": [{"parts": [{"text": prompt}]}]}
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
-    if json_mode:
+    if json_mode and not grounded:
         body["generationConfig"] = {"responseMimeType": "application/json"}
     if grounded:
         body["tools"] = [{"google_search": {}}]
-    with httpx.Client(timeout=60) as c:
-        r = c.post(url, json=body)
-        r.raise_for_status()
-        data = r.json()
-    text = ""
-    try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        pass
-    return {"text": text, "provider": "gemini", "model": model, "grounded_sources": [], "degraded": False}
+
+    last_status = None
+    last_body = ""
+    for model in candidates:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={cfg.api_key}"
+        for attempt in range(2):
+            try:
+                with httpx.Client(timeout=90) as c:
+                    r = c.post(url, json=body)
+                last_status = r.status_code
+                if r.status_code == 200:
+                    data = r.json()
+                    text = ""
+                    sources: list[dict] = []
+                    try:
+                        text = data["candidates"][0]["content"]["parts"][0]["text"]
+                    except Exception:
+                        pass
+                    try:
+                        for cand in data.get("candidates", []) or []:
+                            gm = cand.get("groundingMetadata") or {}
+                            for chunk in gm.get("groundingChunks", []) or []:
+                                web = chunk.get("web") or {}
+                                if web.get("uri"):
+                                    sources.append({"title": web.get("title", ""), "uri": web.get("uri", "")})
+                    except Exception:
+                        pass
+                    return {
+                        "text": text,
+                        "provider": "gemini",
+                        "model": model,
+                        "grounded_sources": sources,
+                        "degraded": False,
+                    }
+                last_body = r.text[:300]
+                if r.status_code in (429, 503):
+                    log.warning("gemini http %s on model %s attempt %d, will fallback", r.status_code, model, attempt)
+                    time.sleep(0.6 * (attempt + 1))
+                    continue
+                # otros errores: no merece la pena reintentar
+                break
+            except Exception as e:
+                log.warning("gemini http exception on model %s attempt %d: %s", model, attempt, e)
+                time.sleep(0.5)
+        # próximo modelo del chain
+    log.error("gemini http all models exhausted: last_status=%s body=%s", last_status, last_body[:200])
+    return {
+        "text": "",
+        "provider": "gemini",
+        "model": candidates[0],
+        "grounded_sources": [],
+        "degraded": True,
+        "error": f"gemini-{last_status}",
+    }
 
 
 def _gemini_image(cfg: ProviderConfig, prompt: str, *, n: int, aspect: str) -> list[str]:
