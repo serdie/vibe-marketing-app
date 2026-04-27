@@ -25,12 +25,13 @@ export function LeadsPage({ project, onNext }: { project: Project; onNext?: () =
   async function search() {
     setBusy(true); setError(null)
     try {
-      await api.post(`/api/projects/${project.id}/leads/search`, {
+      const r: any = await api.post(`/api/projects/${project.id}/leads/search`, {
         query: query || undefined,
         location: location || undefined,
         limit,
         enrich_with_scrape: enrich,
       })
+      if (r?.degraded && r?.error) setError(r.error)
       await refresh()
     } catch (e: any) { setError(e.message) } finally { setBusy(false) }
   }

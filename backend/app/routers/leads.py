@@ -68,11 +68,23 @@ def search_leads(pid: str, body: LeadSearchRequest, db: Session = Depends(get_db
         "NUNCA inventes negocios; si no tienes 10, devuelve menos. "
         "Devuelve JSON {leads: [...]}. JSON válido sin markdown."
     )
-    out = providers.call_json(prompt, grounded=True, system="Encuentra negocios reales con su web pública. No mezcles con otros nombres parecidos.")
+    try:
+        out = providers.call_json(prompt, grounded=True, system="Encuentra negocios reales con su web pública. No mezcles con otros nombres parecidos.")
+    except Exception as e:
+        return {"leads": [], "sources": [], "degraded": True, "error": f"AI provider error: {e}"}
     data = out.get("data") or {}
     raw_leads = data.get("leads") if isinstance(data, dict) else []
     if not raw_leads and isinstance(data, list):
         raw_leads = data
+    if raw_leads is None:
+        raw_leads = []
+    if not raw_leads:
+        return {
+            "leads": [],
+            "sources": out.get("grounded_sources", []),
+            "degraded": True,
+            "error": "El proveedor de IA no devolvió leads (cuota agotada o respuesta vacía). Vuelve a intentar en unos minutos o cambia de modelo en Ajustes.",
+        }
 
     saved: list[Lead] = []
     for item in raw_leads[: body.limit]:
