@@ -139,15 +139,19 @@ PROVIDER_CATALOG: list[dict] = [
     },
     {
         "id": "openrouter",
-        "name": "OpenRouter (router multi-modelo)",
+        "name": "OpenRouter (router multi-modelo + web)",
         "env": "OPENROUTER_API_KEY",
         "needs_base_url": False,
-        "tasks": ["text"],
-        "default_models": {"text": "openai/gpt-4o-mini"},
+        "tasks": ["text", "grounded"],
+        "default_models": {
+            "text": "openai/gpt-4o-mini",
+            "grounded": "openai/gpt-4o-mini:online",
+        },
         "models": [
             "openai/gpt-4o-mini", "openai/gpt-4o", "anthropic/claude-3.5-sonnet",
             "google/gemini-2.0-flash-001", "meta-llama/llama-3.3-70b-instruct",
-            "deepseek/deepseek-chat", "x-ai/grok-2-latest",
+            "deepseek/deepseek-chat", "x-ai/grok-2-1212",
+            "openai/gpt-4o-mini:online", "perplexity/llama-3.1-sonar-small-128k-online",
         ],
         "docs": "https://openrouter.ai/keys",
     },
@@ -642,14 +646,20 @@ def _openai_text(cfg: ProviderConfig, prompt: str, *, system: str | None, json_m
         r = c.post(f"{base}/chat/completions", json=body, headers=headers)
         r.raise_for_status()
         data = r.json()
-    text = data["choices"][0]["message"]["content"] or ""
+    choice = data["choices"][0]
+    text = choice["message"]["content"] or ""
     sources: list[dict] = []
-    if grounded and cfg.id == "xai":
-        for cit in (data.get("citations") or [])[:20]:
+    if grounded:
+        cits = data.get("citations") or choice.get("message", {}).get("annotations") or []
+        for cit in cits[:20]:
             if isinstance(cit, str):
                 sources.append({"uri": cit, "title": cit})
             elif isinstance(cit, dict):
-                sources.append({"uri": cit.get("url") or cit.get("uri") or "", "title": cit.get("title") or cit.get("url") or ""})
+                url_ref = cit.get("url_citation") if isinstance(cit.get("url_citation"), dict) else None
+                uri = (url_ref or cit).get("url") or cit.get("uri") or ""
+                title = (url_ref or cit).get("title") or uri
+                if uri:
+                    sources.append({"uri": uri, "title": title})
     return {"text": text, "provider": cfg.id, "model": model, "grounded_sources": sources, "degraded": False}
 
 
