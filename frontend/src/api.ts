@@ -64,6 +64,8 @@ export type ProviderCatalog = {
   name: string
   env: string | null
   needs_base_url: boolean
+  needs_from_email?: boolean
+  smtp_hint?: string
   tasks: string[]
   default_models: Record<string, string>
   models: string[]

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, Project } from '../api'
+import ProgressBar, { ESTIMATED } from '../components/ProgressBar'
 
 export function OwnerPage({ project, onUpdate, onNext }: { project: Project; onUpdate: () => void; onNext?: () => void }) {
   const [name, setName] = useState(project.full_name || project.name || '')
@@ -72,7 +73,9 @@ export function OwnerPage({ project, onUpdate, onNext }: { project: Project; onU
           </button>
           {hasResearch && onNext && <button className="btn-secondary ml-auto" onClick={onNext}>▶ Siguiente: Carencias</button>}
         </div>
-        {progress && <div className="md:col-span-2 text-brand-700 text-sm">{progress}</div>}
+        <div className="md:col-span-2">
+          <ProgressBar active={busy} estimatedSeconds={ESTIMATED.research.seconds} steps={ESTIMATED.research.steps} title="Investigación profunda del propietario" />
+        </div>
         {error && <div className="md:col-span-2 text-rose-600 text-sm">{error}</div>}
       </section>
 

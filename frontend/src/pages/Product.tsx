@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, Project } from '../api'
+import ProgressBar, { ESTIMATED } from '../components/ProgressBar'
 
 type ProductRow = { name: string; description: string; price?: string; category?: string }
 
@@ -66,6 +67,7 @@ export function ProductPage({ project, onUpdate, onNext }: { project: Project; o
           <button className="btn-primary" onClick={generate} disabled={busy}>{busy ? 'Generando…' : '🎯 Generar ICP y buyer personas'}</button>
           <button className="btn-secondary" onClick={autoBrandKit} disabled={bkBusy}>{bkBusy ? 'Sugiriendo…' : '🎨 Sugerir brand kit'}</button>
         </div>
+        <ProgressBar active={busy || bkBusy} estimatedSeconds={ESTIMATED.icp.seconds} steps={ESTIMATED.icp.steps} title={bkBusy ? 'Sugiriendo brand kit' : 'Generando ICP + personas'} />
       </section>
 
       {icp && (

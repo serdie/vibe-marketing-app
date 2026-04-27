@@ -163,6 +163,7 @@ class ProviderKey(Base):
     base_url: Mapped[str | None] = mapped_column(String(512))
     models: Mapped[dict | None] = mapped_column(JSON)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    extra: Mapped[dict | None] = mapped_column(JSON)  # from_email, smtp_user, etc.
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
 
@@ -187,4 +188,14 @@ class AILog(Base):
 
 def init_db():
     from . import db as _db
+    from sqlalchemy import text, inspect
     Base.metadata.create_all(bind=_db.engine)
+    # Migraciones ligeras sobre SQLite: añadir columnas nuevas si faltan
+    try:
+        with _db.engine.begin() as conn:
+            insp = inspect(conn)
+            cols = {c["name"] for c in insp.get_columns("provider_keys")}
+            if "extra" not in cols:
+                conn.execute(text("ALTER TABLE provider_keys ADD COLUMN extra JSON"))
+    except Exception:
+        pass

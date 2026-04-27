@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, Project } from '../api'
+import ProgressBar, { ESTIMATED } from '../components/ProgressBar'
 
 export function GapsPage({ project, onUpdate, onNext }: { project: Project; onUpdate: () => void; onNext?: () => void }) {
   const [extra, setExtra] = useState('')
@@ -38,7 +39,7 @@ export function GapsPage({ project, onUpdate, onNext }: { project: Project; onUp
           </button>
           {hasGaps && onNext && <button className="btn-secondary ml-auto" onClick={onNext}>▶ Siguiente: Productos e ICP</button>}
         </div>
-        {progress && <div className="text-brand-700 text-sm mt-2">{progress}</div>}
+        <ProgressBar active={busy} estimatedSeconds={ESTIMATED.gaps.seconds} steps={ESTIMATED.gaps.steps} title="Análisis de carencias y competencia" />
         {error && <div className="text-rose-600 text-sm mt-2">{error}</div>}
         {g.degraded && <div className="chip chip-warn mt-2">Modo demo (sin IA real)</div>}
       </section>

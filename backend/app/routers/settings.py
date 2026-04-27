@@ -23,6 +23,7 @@ class ProviderUpsert(BaseModel):
     base_url: str | None = None
     models: dict[str, str] | None = None
     enabled: bool = True
+    extra: dict | None = None  # from_email, smtp_user, smtp_starttls, etc.
 
 
 class PreferenceSet(BaseModel):
@@ -50,7 +51,7 @@ def upsert_provider(p: ProviderUpsert, db: Session = Depends(get_db)):
     models = p.models or dict(CATALOG_BY_ID[p.id]["default_models"])
     registry.upsert(ProviderConfig(
         id=p.id, api_key=p.api_key, base_url=p.base_url,
-        models=models, enabled=p.enabled,
+        models=models, enabled=p.enabled, extra=p.extra,
     ))
     row = db.get(ProviderKey, p.id)
     if row is None:
@@ -60,6 +61,7 @@ def upsert_provider(p: ProviderUpsert, db: Session = Depends(get_db)):
     row.base_url = p.base_url
     row.models = models
     row.enabled = p.enabled
+    row.extra = p.extra
     db.flush()
     return {"ok": True, "configured": registry.list_configured()}
 

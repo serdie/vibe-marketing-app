@@ -11,6 +11,8 @@ export function SettingsPage() {
   const [baseUrlInput, setBaseUrlInput] = useState('')
   const [modelOverride, setModelOverride] = useState<Record<string, string>>({})
   const [testResult, setTestResult] = useState<Record<string, any>>({})
+  const [fromEmail, setFromEmail] = useState('')
+  const [smtpUser, setSmtpUser] = useState('')
 
   async function refresh() {
     const c = await api.get<{ providers: ProviderCatalog[] }>('/api/settings/providers/catalog')
@@ -22,14 +24,18 @@ export function SettingsPage() {
   useEffect(() => { refresh().catch(() => {}) }, [])
 
   async function save(p: ProviderCatalog) {
+    const extra: Record<string, string> = {}
+    if ((p as any).needs_from_email && fromEmail) extra.from_email = fromEmail
+    if (p.id === 'smtp' && smtpUser) extra.smtp_user = smtpUser
     await api.post('/api/settings/providers', {
       id: p.id,
       api_key: keyInput,
       base_url: baseUrlInput || null,
       models: { ...p.default_models, ...modelOverride },
       enabled: true,
+      extra: Object.keys(extra).length ? extra : null,
     })
-    setEditing(null); setKeyInput(''); setBaseUrlInput(''); setModelOverride({})
+    setEditing(null); setKeyInput(''); setBaseUrlInput(''); setModelOverride({}); setFromEmail(''); setSmtpUser('')
     refresh()
   }
   async function del(id: string) { await api.del('/api/settings/providers/' + id); refresh() }
@@ -63,7 +69,7 @@ export function SettingsPage() {
       <section className="card">
         <h2 className="font-semibold mb-2">Preferencias por tarea</h2>
         <div className="grid md:grid-cols-3 gap-2 text-sm">
-          {['text', 'image', 'grounded', 'video', 'audio'].map(task => (
+          {['text', 'image', 'grounded', 'video', 'audio', 'email'].map(task => (
             <div key={task} className="flex items-center gap-2">
               <span className="label w-20">{task}</span>
               <select className="input" value={prefs[task] || ''} onChange={e => setPref(task, e.target.value)}>
@@ -98,8 +104,12 @@ export function SettingsPage() {
 
                 {editing === p.id ? (
                   <div className="mt-3 space-y-2">
-                    <input className="input" placeholder="API key" value={keyInput} onChange={e => setKeyInput(e.target.value)} />
-                    {p.needs_base_url && <input className="input" placeholder="Base URL (ej. http://localhost:11434/v1)" value={baseUrlInput} onChange={e => setBaseUrlInput(e.target.value)} />}
+                    <input className="input" placeholder={p.id === 'smtp' ? 'Contraseña / App Password' : 'API key'} value={keyInput} onChange={e => setKeyInput(e.target.value)} />
+                    {p.needs_base_url && <input className="input" placeholder={p.id === 'smtp' ? 'smtp.gmail.com:587' : 'Base URL (ej. http://localhost:11434/v1)'} value={baseUrlInput} onChange={e => setBaseUrlInput(e.target.value)} />}
+                    {(p as any).needs_from_email && <input className="input" placeholder="From email (remitente, ej. hola@tudominio.com)" value={fromEmail} onChange={e => setFromEmail(e.target.value)} />}
+                    {p.id === 'smtp' && <input className="input" placeholder="Usuario SMTP (email de login, ej. tu@gmail.com)" value={smtpUser} onChange={e => setSmtpUser(e.target.value)} />}
+                    {p.id === 'smtp' && <p className="text-xs text-slate-500">Para Gmail: host <code>smtp.gmail.com</code>, puerto <code>587</code>, y usa una <a href="https://support.google.com/accounts/answer/185833" target="_blank" rel="noreferrer" className="text-brand-700 hover:underline">App Password</a> (no tu contraseña normal).</p>}
+                    {p.id === 'resend' && <p className="text-xs text-slate-500">Consigue tu API key en <a href="https://resend.com/api-keys" target="_blank" rel="noreferrer" className="text-brand-700 hover:underline">resend.com/api-keys</a>. Si no tienes dominio verificado, usa <code>onboarding@resend.dev</code> como remitente.</p>}
                     {Object.entries(p.default_models).map(([task, def]) => (
                       <div key={task} className="grid grid-cols-3 gap-2 items-center">
                         <span className="label">{task}</span>

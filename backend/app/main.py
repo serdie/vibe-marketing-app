@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import get_settings
 from .models import init_db
+from .providers import ProviderUnavailable
 from .routers import (
     automations,
     calendar,
@@ -49,11 +51,36 @@ def _startup():
                 _p.registry.upsert(_p.ProviderConfig(
                     id=row.id, api_key=row.api_key, base_url=row.base_url,
                     models=row.models, enabled=row.enabled,
+                    extra=getattr(row, "extra", None),
                 ))
             for tp in s.query(TaskPreference).all():
                 _p.registry.set_preference(tp.task, tp.provider_id)
     except Exception as e:
         log.warning("Provider hydration failed: %s", e)
+    # Arranca scheduler real de automatizaciones
+    try:
+        from . import scheduler
+        scheduler.start()
+        log.info("Scheduler started")
+    except Exception as e:
+        log.warning("Scheduler start failed: %s", e)
+
+
+@app.on_event("shutdown")
+def _shutdown():
+    try:
+        from . import scheduler
+        scheduler.stop()
+    except Exception:
+        pass
+
+
+@app.exception_handler(ProviderUnavailable)
+async def _provider_unavailable(_req: Request, exc: ProviderUnavailable):
+    return JSONResponse(
+        status_code=503,
+        content={"error": "provider_unavailable", "message": str(exc), "degraded": True},
+    )
 
 
 @app.get("/healthz")

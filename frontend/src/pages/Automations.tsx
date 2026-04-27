@@ -61,11 +61,21 @@ export function AutomationsPage({ project }: { project: Project }) {
           </select>
           <input className="input md:col-span-3" placeholder='Trigger config JSON' value={triggerCfg} onChange={e => setTriggerCfg(e.target.value)} />
           <select className="input md:col-span-2" value={action} onChange={e => setAction(e.target.value)}>
-            <option value="publish_post">publish_post</option><option value="reply_comment">reply_comment</option><option value="send_email">send_email</option><option value="tag_lead">tag_lead</option>
+            <option value="publish_post">publish_post</option><option value="webhook">webhook (Make/n8n/Zapier)</option><option value="reply_comment">reply_comment</option><option value="send_email">send_email</option><option value="tag_lead">tag_lead</option>
           </select>
           <input className="input md:col-span-2" placeholder='Action config JSON' value={actionCfg} onChange={e => setActionCfg(e.target.value)} />
         </div>
         <button className="btn-primary mt-2" onClick={create}>Crear</button>
+        <details className="mt-3 text-xs text-slate-600">
+          <summary className="cursor-pointer">Ejemplos de configuración</summary>
+          <div className="mt-2 space-y-2">
+            <div><b>Schedule cron (todos los días a las 9:00):</b><pre className="bg-slate-50 p-2 rounded">{'{ "kind": "cron", "cron": "0 9 * * *" }'}</pre></div>
+            <div><b>Schedule una vez:</b><pre className="bg-slate-50 p-2 rounded">{'{ "kind": "once", "at": "2025-05-01T09:00:00Z" }'}</pre></div>
+            <div><b>Schedule cada N segundos:</b><pre className="bg-slate-50 p-2 rounded">{'{ "kind": "interval", "seconds": 3600 }'}</pre></div>
+            <div><b>Acción webhook (para RRSS vía Make/n8n/Zapier):</b><pre className="bg-slate-50 p-2 rounded">{'{ "url": "https://hook.eu1.make.com/abc", "asset_id": "...", "payload": { "network": "instagram" } }'}</pre></div>
+            <div><b>Acción send_email:</b><pre className="bg-slate-50 p-2 rounded">{'{ "to": "cliente@empresa.com", "subject": "Hola", "html": "<p>Hola</p>" }'}</pre></div>
+          </div>
+        </details>
       </section>
 
       <section className="card">

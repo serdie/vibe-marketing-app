@@ -11,7 +11,19 @@ from sqlalchemy.orm import Session
 from .. import providers
 from ..config import get_settings
 from ..db import get_db
+from ..email_sender import EmailProviderMissing, EmailSendError, send_email
 from ..models import Asset, Campaign, EmailSend, Lead, Project
+from ..providers import ProviderUnavailable
+
+
+def _safe_images(prompt: str, n: int = 1, aspect: str = "1:1") -> tuple[list[str], str | None]:
+    """Genera imágenes; si no hay proveedor, devuelve lista vacía + nota informativa."""
+    try:
+        return providers.call_image(prompt, n=n, aspect=aspect), None
+    except ProviderUnavailable as e:
+        return [], str(e)
+    except Exception as e:
+        return [], f"Error generando imagen: {e}"
 
 router = APIRouter(prefix="/api/projects/{pid}/campaigns", tags=["campaigns"])
 
@@ -60,6 +72,9 @@ class EmailBatchRequest(BaseModel):
     body_template: str | None = None
     use_ai: bool = True
     ab_test: bool = True
+    send: bool = True  # si False sólo prepara (con tracking) sin enviar
+    test_mode: bool = False  # si True envía todos los emails a override_to
+    override_to: str | None = None  # email donde mandar todo cuando test_mode=True
 
 
 @router.get("")
@@ -129,9 +144,11 @@ def create_campaign(pid: str, body: CampaignCreate, db: Session = Depends(get_db
             f"Tono: {brand.get('tono','')}. Estilo limpio, vectorial, fondo blanco, alto contraste. "
             f"Sin texto si es difícil de renderizar."
         )
-        imgs = providers.call_image(prompt, n=2, aspect="1:1")
+        imgs, img_err = _safe_images(prompt, n=2, aspect="1:1")
         for i, b64 in enumerate(imgs):
             _save_asset(db, c, kind="logo", title=f"Logo opción {i+1}", image_data=b64, meta={"prompt": prompt})
+        if img_err and not imgs:
+            _save_asset(db, c, kind="logo", title="Logo (pendiente)", text=img_err, meta={"prompt": prompt, "error": img_err})
 
     # 4) Folleto (brochure) — texto + imagen banner
     if sel.get("brochure"):
@@ -139,7 +156,7 @@ def create_campaign(pid: str, body: CampaignCreate, db: Session = Depends(get_db
             ctx + "\nCrea un folleto comercial A4 con secciones (titular, subtitular, beneficios, "
                   "casos de éxito breves, llamada a acción, contacto). Devuelve JSON {brochure: {...}}.",
         )
-        b64 = providers.call_image(
+        b64, img_err = _safe_images(
             f"Folleto A4 vertical para {p.full_name or p.name} sector {profile.get('sector','')}, "
             f"colores {brand.get('colores', ['#0EA5E9','#111827'])}, estilo moderno, espacio para texto.",
             n=1, aspect="9:16",
@@ -147,7 +164,7 @@ def create_campaign(pid: str, body: CampaignCreate, db: Session = Depends(get_db
         _save_asset(db, c, kind="brochure", title="Folleto",
                     text=str((out.get("data") or {}).get("brochure")),
                     image_data=b64[0] if b64 else None,
-                    meta={"raw": out.get("data")})
+                    meta={"raw": out.get("data"), "image_error": img_err})
 
     # 5) Newsletter
     if sel.get("newsletter"):
@@ -167,9 +184,11 @@ def create_campaign(pid: str, body: CampaignCreate, db: Session = Depends(get_db
             f"colores {brand.get('colores', ['#0EA5E9','#111827'])}, claim '{(brand.get('claims') or ['Calidad y confianza'])[0]}', "
             f"estilo moderno, espacio para logo arriba a la izquierda."
         )
-        imgs = providers.call_image(prompt, n=1, aspect="16:9")
+        imgs, img_err = _safe_images(prompt, n=1, aspect="16:9")
         for i, b64 in enumerate(imgs):
             _save_asset(db, c, kind="banner", title=f"Banner {i+1}", image_data=b64, meta={"prompt": prompt})
+        if img_err and not imgs:
+            _save_asset(db, c, kind="banner", title="Banner (pendiente)", text=img_err, meta={"prompt": prompt, "error": img_err})
 
     # 7) Posts redes sociales
     posts_spec = sel.get("posts") or []
@@ -191,11 +210,11 @@ def create_campaign(pid: str, body: CampaignCreate, db: Session = Depends(get_db
         if "image" in kind or "infographic" in kind or "text+image" in kind:
             img_prompt = cd.get("prompt_imagen") or f"Imagen para post {platform} de {p.full_name or p.name}"
             aspect = "1:1" if platform in ("instagram", "facebook") else "9:16" if platform == "tiktok" else "16:9"
-            imgs = providers.call_image(img_prompt, n=1, aspect=aspect)
+            imgs, img_err = _safe_images(img_prompt, n=1, aspect=aspect)
             _save_asset(
                 db, c, kind="post", title=f"Post {platform}",
                 text=body_text, image_data=imgs[0] if imgs else None,
-                meta={"platform": platform, "kind": kind, "prompt_imagen": img_prompt, "alt_text": cd.get("alt_text")},
+                meta={"platform": platform, "kind": kind, "prompt_imagen": img_prompt, "alt_text": cd.get("alt_text"), "image_error": img_err},
             )
         elif kind == "video":
             vid = providers.call_video(cd.get("prompt_imagen") or text)
@@ -205,11 +224,11 @@ def create_campaign(pid: str, body: CampaignCreate, db: Session = Depends(get_db
             )
         elif kind == "infographic":
             img_prompt = f"Infografía vertical sobre: {text[:200]}"
-            imgs = providers.call_image(img_prompt, n=1, aspect="9:16")
+            imgs, img_err = _safe_images(img_prompt, n=1, aspect="9:16")
             _save_asset(
                 db, c, kind="infographic", title=f"Infografía {platform}",
                 text=body_text, image_data=imgs[0] if imgs else None,
-                meta={"platform": platform, "prompt_imagen": img_prompt},
+                meta={"platform": platform, "prompt_imagen": img_prompt, "image_error": img_err},
             )
         else:  # solo texto
             _save_asset(db, c, kind="post", title=f"Post {platform}", text=body_text,
@@ -394,11 +413,42 @@ def email_batch(pid: str, cid: str, body: EmailBatchRequest, db: Session = Depen
         html_body += f'<img src="{base_track}/api/track/open/{send.id}.png" width="1" height="1" alt=""/>'
         send.body_html = html_body
         db.flush()
-        sends_out.append({"id": send.id, "to": lead.email, "subject": subject, "variant": variant})
 
-    c.status = "sent"  # en demo, marcamos como enviada (no SMTP real)
+        sent_info: dict[str, Any] = {"id": send.id, "to": lead.email, "subject": subject, "variant": variant}
+        if body.send:
+            to_email = body.override_to if (body.test_mode and body.override_to) else lead.email
+            try:
+                res = send_email(
+                    to=to_email,
+                    subject=subject,
+                    html=html_body,
+                    from_name=(p.full_name or p.name),
+                )
+                send.sent_at = dt.datetime.utcnow()
+                db.flush()
+                sent_info["sent"] = True
+                sent_info["provider"] = res.get("provider")
+                if body.test_mode:
+                    sent_info["actually_sent_to"] = to_email
+            except EmailProviderMissing as e:
+                raise HTTPException(400, str(e))
+            except EmailSendError as e:
+                sent_info["sent"] = False
+                sent_info["error"] = str(e)
+        else:
+            sent_info["sent"] = False
+
+        sends_out.append(sent_info)
+
+    sent_count = sum(1 for s in sends_out if s.get("sent"))
+    failed_count = sum(1 for s in sends_out if s.get("sent") is False and s.get("error"))
+    c.status = "sent" if sent_count > 0 else "prepared"
     db.flush()
-    return {"sends": sends_out, "count": len(sends_out), "note": "Emails preparados con tracking real. Envío real requiere SMTP/Resend (pendiente de configurar)."}
+    note = (
+        f"{sent_count} emails enviados realmente; {failed_count} fallaron; "
+        f"{len(sends_out) - sent_count - failed_count} preparados sin enviar."
+    )
+    return {"sends": sends_out, "count": len(sends_out), "sent_count": sent_count, "failed_count": failed_count, "note": note}
 
 
 def _rewrite_links(html: str, send_id: str, base: str) -> str:

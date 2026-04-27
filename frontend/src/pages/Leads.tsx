@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, getApiBase, Project } from '../api'
+import ProgressBar, { ESTIMATED } from '../components/ProgressBar'
 
 type Lead = {
   id: string; name: string; website?: string; email?: string; phone?: string
@@ -62,6 +63,7 @@ export function LeadsPage({ project, onNext }: { project: Project; onNext?: () =
           <a className="btn-secondary" href={csvHref} target="_blank" rel="noreferrer">⬇ Exportar CSV</a>
           <span className="text-xs text-slate-500">{leads.length} leads guardados</span>
         </div>
+        <ProgressBar active={busy} estimatedSeconds={ESTIMATED.leads.seconds} steps={ESTIMATED.leads.steps} title="Búsqueda y enriquecimiento de leads" />
         {error && <div className="text-rose-600 text-sm mt-2">{error}</div>}
       </section>
 

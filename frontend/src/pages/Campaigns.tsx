@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, Project } from '../api'
+import ProgressBar, { ESTIMATED } from '../components/ProgressBar'
 
 type Asset = {
   id: string; kind: string; title?: string; text?: string
@@ -61,7 +62,11 @@ export function CampaignsPage({ project }: { project: Project }) {
       </div>
 
       {showNew && <NewCampaignModal projectId={project.id} onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); refresh().then(() => selectCampaign(id)) }} setBusy={setBusy} />}
-      {busy && <div className="fixed bottom-4 right-4 bg-white border border-slate-200 rounded-lg shadow px-4 py-2 text-sm">Generando con IA…</div>}
+      {busy && (
+        <div className="fixed bottom-4 right-4 bg-white border border-slate-200 rounded-lg shadow-xl p-4 text-sm w-[360px]" style={{ zIndex: 60 }}>
+          <ProgressBar active={busy} estimatedSeconds={ESTIMATED.campaign.seconds} steps={ESTIMATED.campaign.steps} title="Generando campaña con IA" />
+        </div>
+      )}
     </div>
   )
 }
@@ -217,6 +222,7 @@ function CampaignDetail({ project, campaign, onChanged }: { project: Project; ca
             <div><label className="label">Días</label><input className="input" type="number" value={duration} onChange={e => setDuration(parseInt(e.target.value || '0', 10))} /></div>
           </div>
           <button className="btn-primary mt-3" onClick={predict} disabled={pBusy}>{pBusy ? 'Calculando…' : 'Predecir'}</button>
+          <ProgressBar active={pBusy} estimatedSeconds={ESTIMATED.prediction.seconds} steps={ESTIMATED.prediction.steps} />
           {campaign.prediction && (
             <div className="mt-3 text-sm">
               <div className="font-semibold">≈ {campaign.prediction.total_conversiones_estimadas} conversiones</div>
@@ -238,6 +244,7 @@ function CampaignDetail({ project, campaign, onChanged }: { project: Project; ca
             <div><label className="label">Costes fijos €</label><input className="input" type="number" value={fixed} onChange={e => setFixed(parseFloat(e.target.value || '0'))} /></div>
           </div>
           <button className="btn-primary mt-3" onClick={roi} disabled={rBusy}>{rBusy ? 'Calculando…' : 'Calcular ROI'}</button>
+          <ProgressBar active={rBusy} estimatedSeconds={ESTIMATED.roi.seconds} steps={ESTIMATED.roi.steps} />
           {campaign.roi && (
             <div className="mt-3 text-sm">
               <div className="grid grid-cols-2 gap-2">
@@ -267,6 +274,7 @@ function CampaignDetail({ project, campaign, onChanged }: { project: Project; ca
         <h3 className="font-semibold mb-2">📬 Email batch a leads (con tracking)</h3>
         <p className="text-sm text-slate-600">Genera emails personalizados (variantes A/B) para todos los leads del proyecto. El backend inserta pixel de apertura y reescribe links para medir clicks.</p>
         <button className="btn-primary mt-2" onClick={emailBatch} disabled={eBusy}>{eBusy ? 'Preparando…' : 'Preparar batch'}</button>
+        <ProgressBar active={eBusy} estimatedSeconds={ESTIMATED.email_batch.seconds} steps={ESTIMATED.email_batch.steps} title="Batch de emails" />
       </div>
     </div>
   )

@@ -26,6 +26,11 @@ import httpx
 log = logging.getLogger("providers")
 
 
+class ProviderUnavailable(Exception):
+    """Se lanza cuando no hay ningún proveedor de IA disponible/operativo."""
+    pass
+
+
 # ---------- Catálogo estático de proveedores que la UI muestra ----------
 
 PROVIDER_CATALOG: list[dict] = [
@@ -222,6 +227,29 @@ PROVIDER_CATALOG: list[dict] = [
         "models": [],
         "docs": "https://platform.openai.com/docs/api-reference",
     },
+    {
+        "id": "resend",
+        "name": "Resend (envío email)",
+        "env": "RESEND_API_KEY",
+        "needs_base_url": False,
+        "tasks": ["email"],
+        "default_models": {"email": "resend"},
+        "models": ["resend"],
+        "needs_from_email": True,
+        "docs": "https://resend.com/api-keys",
+    },
+    {
+        "id": "smtp",
+        "name": "SMTP (Gmail, Outlook, servidor propio)",
+        "env": None,
+        "needs_base_url": True,
+        "tasks": ["email"],
+        "default_models": {"email": "smtp"},
+        "models": ["smtp"],
+        "needs_from_email": True,
+        "smtp_hint": "base_url formato host:port ej. smtp.gmail.com:587. En api_key pon la contraseña (Gmail: App Password).",
+        "docs": "https://support.google.com/accounts/answer/185833",
+    },
 ]
 
 
@@ -235,6 +263,7 @@ class ProviderConfig:
     base_url: str | None = None
     models: dict[str, str] | None = None  # task -> model override
     enabled: bool = True
+    extra: dict | None = None  # smtp_user, from_email, etc.
 
 
 # ---------- Registry global (en memoria, hidratado desde DB al arrancar) ----------
@@ -274,6 +303,9 @@ class ProviderRegistry:
 
     def set_preference(self, task: str, pid: str) -> None:
         self._preference[task] = pid
+
+    def all(self) -> list[ProviderConfig]:
+        return list(self._configs.values())
 
     def list_configured(self) -> list[dict]:
         out = []
@@ -369,20 +401,15 @@ def call_text(prompt: str, *, system: str | None = None, json_mode: bool = False
                     candidates.append(cfg2); seen.add(pid2)
 
     if not candidates:
-        return {
-            "text": _demo_text(prompt, json_mode),
-            "provider": "demo",
-            "model": "fallback",
-            "degraded": True,
-            "grounded_sources": [],
-        }
+        raise ProviderUnavailable(
+            "No hay ningún proveedor de IA configurado. Ve a Ajustes → Proveedores y añade al menos una clave (OpenRouter, Gemini, OpenAI, DeepSeek, Groq, etc.)."
+        )
 
     last_err = None
-    last_cfg: ProviderConfig | None = None
+    tried: list[str] = []
     for cfg in candidates:
-        last_cfg = cfg
+        tried.append(cfg.id)
         cap_grounded = "grounded" in CATALOG_BY_ID.get(cfg.id, {}).get("tasks", [])
-        # Si pedimos grounded pero este proveedor no lo soporta, hacemos call plano (texto) con nota
         effective_grounded = grounded and cap_grounded
         for attempt in range(max_retries + 1):
             try:
@@ -397,14 +424,10 @@ def call_text(prompt: str, *, system: str | None = None, json_mode: bool = False
                 time.sleep(0.5 * (attempt + 1))
         log.warning("text provider %s exhausted, trying next candidate", cfg.id)
 
-    return {
-        "text": _demo_text(prompt, json_mode),
-        "provider": last_cfg.id if last_cfg else "demo",
-        "model": "fallback",
-        "degraded": True,
-        "grounded_sources": [],
-        "error": str(last_err) if last_err else None,
-    }
+    raise ProviderUnavailable(
+        f"Todos los proveedores fallaron ({', '.join(tried)}). Último error: {last_err}. "
+        "Revisa cuotas/claves en Ajustes → Proveedores, o espera unos minutos y reintenta."
+    )
 
 
 def call_json(prompt: str, *, system: str | None = None, grounded: bool = False, provider_id: str | None = None) -> dict:
@@ -430,11 +453,7 @@ def call_json(prompt: str, *, system: str | None = None, grounded: bool = False,
     }
 
 
-def call_image(prompt: str, *, n: int = 1, aspect: str = "1:1", provider_id: str | None = None) -> list[str]:
-    cfg = registry.get(provider_id) if provider_id else registry.choose("image")
-    if cfg is None:
-        from .ai import _placeholder_png_b64  # type: ignore
-        return [_placeholder_png_b64(prompt) for _ in range(n)]
+def _try_image(cfg: "ProviderConfig", prompt: str, n: int, aspect: str) -> list[str] | None:
     try:
         if cfg.id == "gemini":
             return _gemini_image(cfg, prompt, n=n, aspect=aspect)
@@ -450,8 +469,41 @@ def call_image(prompt: str, *, n: int = 1, aspect: str = "1:1", provider_id: str
             return _hf_image(cfg, prompt, n=n, aspect=aspect)
     except Exception as e:
         log.warning("image provider %s failed: %s", cfg.id, e)
-    from .ai import _placeholder_png_b64  # type: ignore
-    return [_placeholder_png_b64(prompt) for _ in range(n)]
+    return None
+
+
+def call_image(prompt: str, *, n: int = 1, aspect: str = "1:1", provider_id: str | None = None) -> list[str]:
+    tried: set[str] = set()
+    # 1. Proveedor explícito
+    if provider_id:
+        cfg = registry.get(provider_id)
+        if cfg and cfg.enabled:
+            out = _try_image(cfg, prompt, n, aspect)
+            if out:
+                return out
+            tried.add(cfg.id)
+    # 2. Preferencia
+    cfg = registry.choose("image")
+    if cfg and cfg.id not in tried and cfg.enabled:
+        out = _try_image(cfg, prompt, n, aspect)
+        if out:
+            return out
+        tried.add(cfg.id)
+    # 3. Cualquier otro con task=image
+    for c in registry.all():
+        if not c.enabled or c.id in tried:
+            continue
+        if "image" not in CATALOG_BY_ID.get(c.id, {}).get("tasks", []):
+            continue
+        out = _try_image(c, prompt, n, aspect)
+        if out:
+            log.info("Image generated via fallback provider %s", c.id)
+            return out
+        tried.add(c.id)
+    raise ProviderUnavailable(
+        "No se pudo generar la imagen: ningún proveedor de imágenes está operativo. "
+        "Configura Gemini (Imagen), OpenAI (gpt-image-1), Together (FLUX) o Replicate en Ajustes → Proveedores."
+    )
 
 
 def call_video(prompt: str, *, provider_id: str | None = None) -> dict:
@@ -833,17 +885,7 @@ def _hf_image(cfg: ProviderConfig, prompt: str, *, n: int, aspect: str) -> list[
 
 
 def _url_to_b64(url: str) -> str:
-    try:
-        with httpx.Client(timeout=60) as c:
-            r = c.get(url)
-            r.raise_for_status()
-            return base64.b64encode(r.content).decode("ascii")
-    except Exception:
-        from .ai import _placeholder_png_b64  # type: ignore
-        return _placeholder_png_b64(url)
-
-
-def _demo_text(prompt: str, json_mode: bool) -> str:
-    if json_mode:
-        return json.dumps({"note": "demo mode - configura un proveedor de IA", "echo": prompt[:200]}, ensure_ascii=False)
-    return "[DEMO] Configura un proveedor de IA en Ajustes → Proveedores. Prompt: " + prompt[:300]
+    with httpx.Client(timeout=60) as c:
+        r = c.get(url)
+        r.raise_for_status()
+        return base64.b64encode(r.content).decode("ascii")

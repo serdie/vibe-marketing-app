@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .. import providers
 from ..db import get_db
+from ..email_sender import EmailProviderMissing, EmailSendError, send_email
 from ..models import Asset, Automation, Campaign, Project
+
+log = logging.getLogger("automations")
 
 router = APIRouter(prefix="/api/projects/{pid}/automations", tags=["automations"])
 
@@ -29,6 +34,14 @@ def list_automations(pid: str, db: Session = Depends(get_db)):
     return [_a(a) for a in rows]
 
 
+def _resync():
+    try:
+        from .. import scheduler
+        scheduler.sync_jobs()
+    except Exception:
+        log.exception("scheduler sync failed")
+
+
 @router.post("")
 def create_automation(pid: str, body: AutomationCreate, db: Session = Depends(get_db)):
     p = db.get(Project, pid)
@@ -37,6 +50,8 @@ def create_automation(pid: str, body: AutomationCreate, db: Session = Depends(ge
     a = Automation(project_id=pid, **body.model_dump())
     db.add(a)
     db.flush()
+    db.commit()
+    _resync()
     return _a(a)
 
 
@@ -48,6 +63,8 @@ def update_automation(pid: str, aid: str, body: AutomationCreate, db: Session = 
     for k, v in body.model_dump().items():
         setattr(a, k, v)
     db.flush()
+    db.commit()
+    _resync()
     return _a(a)
 
 
@@ -57,48 +74,93 @@ def del_automation(pid: str, aid: str, db: Session = Depends(get_db)):
     if not a or a.project_id != pid:
         raise HTTPException(404)
     db.delete(a)
+    db.commit()
+    _resync()
     return {"ok": True}
 
 
 @router.post("/{aid}/run")
 def run_automation(pid: str, aid: str, db: Session = Depends(get_db)):
-    """Ejecuta una automatización (simulada). Devuelve evento generado."""
+    """Ejecuta una automatización ahora mismo."""
     a = db.get(Automation, aid)
     if not a or a.project_id != pid:
         raise HTTPException(404)
-
+    event = _execute(a, db)
     runs = list(a.runs or [])
-    event: dict[str, Any] = {"at": dt.datetime.utcnow().isoformat()}
-
-    if a.action_kind == "publish_post":
-        # publicar = marcar asset como publicado
-        asset_id = (a.action_config or {}).get("asset_id")
-        if asset_id:
-            ast = db.get(Asset, asset_id)
-            if ast:
-                ast.published_at = dt.datetime.utcnow()
-                event["published_asset"] = asset_id
-        event["status"] = "published" if event.get("published_asset") else "skipped"
-    elif a.action_kind == "reply_comment":
-        # genera respuesta a un comentario simulado o real
-        comment = (a.action_config or {}).get("comment_text") or "Genial, me encanta!"
-        out = providers.call_text(
-            f"Responde como community manager amable y de marca al comentario: '{comment}'. Máx 200 chars.",
-        )
-        event["reply_text"] = out.get("text")
-        event["status"] = "replied"
-    elif a.action_kind == "tag_lead":
-        event["status"] = "tagged"
-        event["lead_id"] = (a.action_config or {}).get("lead_id")
-    elif a.action_kind == "send_email":
-        event["status"] = "queued"
-    else:
-        event["status"] = "noop"
-
     runs.append(event)
     a.runs = runs
     a.last_run = dt.datetime.utcnow()
     db.flush()
+    return event
+
+
+def _execute(a: Automation, db: Session) -> dict[str, Any]:
+    event: dict[str, Any] = {"at": dt.datetime.utcnow().isoformat(), "action_kind": a.action_kind}
+    cfg = a.action_config or {}
+    try:
+        if a.action_kind == "publish_post":
+            asset_id = cfg.get("asset_id")
+            if asset_id:
+                ast = db.get(Asset, asset_id)
+                if ast:
+                    ast.published_at = dt.datetime.utcnow()
+                    event["published_asset"] = asset_id
+            event["status"] = "published" if event.get("published_asset") else "skipped"
+            event["note"] = "Marcado como publicado en el sistema. Para publicación en red social usa acción 'webhook' (Make/n8n/Zapier)."
+        elif a.action_kind == "webhook":
+            url = cfg.get("url")
+            if not url:
+                event["status"] = "error"
+                event["error"] = "Falta 'url' en action_config."
+            else:
+                payload = cfg.get("payload") or {}
+                # Adjunta info del asset si se pidió
+                asset_id = cfg.get("asset_id")
+                if asset_id:
+                    ast = db.get(Asset, asset_id)
+                    if ast:
+                        payload = {
+                            **payload,
+                            "asset": {
+                                "id": ast.id, "kind": ast.kind, "title": ast.title,
+                                "text": ast.text, "image_base64": ast.image_data,
+                                "meta": ast.meta,
+                            },
+                        }
+                with httpx.Client(timeout=30) as c:
+                    r = c.post(url, json=payload, headers={"Content-Type": "application/json"})
+                event["status"] = "sent" if r.status_code < 400 else "error"
+                event["http_status"] = r.status_code
+                event["response_preview"] = r.text[:300]
+        elif a.action_kind == "reply_comment":
+            comment = cfg.get("comment_text") or "Genial, me encanta!"
+            out = providers.call_text(
+                f"Responde como community manager amable y de marca al comentario: '{comment}'. Máx 200 chars.",
+            )
+            event["reply_text"] = out.get("text")
+            event["status"] = "replied"
+        elif a.action_kind == "tag_lead":
+            event["status"] = "tagged"
+            event["lead_id"] = cfg.get("lead_id")
+        elif a.action_kind == "send_email":
+            to = cfg.get("to")
+            subject = cfg.get("subject") or "Mensaje"
+            html = cfg.get("html") or "<p>Hola</p>"
+            if not to:
+                event["status"] = "error"; event["error"] = "Falta 'to' en action_config."
+            else:
+                res = send_email(to=to, subject=subject, html=html)
+                event["status"] = "sent"
+                event["provider"] = res.get("provider")
+        else:
+            event["status"] = "noop"
+    except EmailProviderMissing as e:
+        event["status"] = "error"; event["error"] = str(e)
+    except EmailSendError as e:
+        event["status"] = "error"; event["error"] = str(e)
+    except Exception as e:
+        log.exception("Automation %s failed", a.id)
+        event["status"] = "error"; event["error"] = str(e)
     return event
 
 
