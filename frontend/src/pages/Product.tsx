@@ -75,7 +75,7 @@ export function ProductPage({ project, onUpdate, onNext }: { project: Project; o
             <div><span className="label">Sector principal</span><div>{icp.sector_principal}</div></div>
             <div><span className="label">Sectores secundarios</span><div>{(icp.sectores_secundarios || []).join(', ')}</div></div>
             <div><span className="label">Tamaño empresa</span><div>{icp.tamano_empresa}</div></div>
-            <div><span className="label">Geo</span><div>{icp.geo}</div></div>
+            <div><span className="label">Geo</span><div>{typeof icp.geo === 'string' ? icp.geo : [icp.geo?.ciudad, icp.geo?.provincia, icp.geo?.pais].filter(Boolean).join(', ')}</div></div>
             <div><span className="label">Presupuesto compra</span><div>{icp.presupuesto_compra}</div></div>
             <div><span className="label">Momento de compra</span><div>{icp.momento_compra}</div></div>
             <div className="md:col-span-2"><span className="label">Criterios de decisión</span>
